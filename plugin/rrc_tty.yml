@@ -1,0 +1,14 @@
+rrc_tty:
+  attributes: 0
+  version:
+    major: 1
+    minor: 0
+  main:
+    start: module_start
+    stop: module_stop
+  libraries:
+    RrcTty:
+      syscall: true
+      functions:
+        - rrcTtyGetInfo
+        - rrcTtyRead

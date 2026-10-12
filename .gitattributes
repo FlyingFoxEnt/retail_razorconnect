@@ -1,0 +1,8 @@
+* text=auto
+
+# Build scripts run under bash (WSL/Linux): keep LF even on a Windows checkout
+*.sh text eol=lf
+
+*.skprx binary
+*.suprx binary
+*.a binary

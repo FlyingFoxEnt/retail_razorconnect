@@ -1,0 +1,17 @@
+# Visual Studio
+.vs/
+*.vsidx
+
+# Python
+__pycache__/
+*.pyc
+
+# Sony firmware PUPs: copyrighted, large; keep out of the repo
+PSVita_Firmware/
+
+# pa_capture build output (links Sony's TMAPI)
+tools/pa_capture/*.exe
+tools/pa_capture/*.dll
+
+# Ghidra script output: decompiled Sony binaries, not redistributable
+*_out.txt

@@ -1,0 +1,226 @@
+diff --git a/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMRHIPrivate.h b/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMRHIPrivate.h
+index 02ef7a1..0a71587 100644
+--- a/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMRHIPrivate.h
++++ b/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMRHIPrivate.h
+@@ -360,3 +360,69 @@ void GXMWaitForFrameFence(uint32 SyncValue, EGXMFenceWaitSite Site = EGXMFenceWa
+ 
+ /** Drains the per-site fence wait totals for the heartbeat. Seconds and counts, indexed by EGXMFenceWaitSite. */
+ void GXMTakeFenceWaits(double OutSeconds[(int32)EGXMFenceWaitSite::Num], uint32 OutCounts[(int32)EGXMFenceWaitSite::Num]);
++
++/*-----------------------------------------------------------------------------
++	The GPU profiler: per-scene GPU timing recorded to ux0:data/gxm_gpu_*.csv. See GXMGpuProfiler.cpp.
++
++	Every hook is a no-op until a recording is running, and compiles to nothing in Shipping.
++-----------------------------------------------------------------------------*/
++
++#define GXM_GPU_PROFILER (!UE_BUILD_SHIPPING)
++
++/** The blocking spans the profiler's frame lines break out. */
++enum class EGXMGpuProfWait : uint8
++{
++	BeginScene,
++	EndScene,
++	Flip,
++	Throttle,
++	Present,
++	RenderStall,
++	EngineSleep,
++	Num
++};
++
++#if GXM_GPU_PROFILER
++
++/** Starts the writer and watcher threads. Game thread, once libgxm is up. */
++void GXMGpuProfStartup();
++
++/** Finishes any recording and tells the threads to stop. */
++void GXMGpuProfShutdown();
++
++/** RHIPushEvent / RHIPopEvent, before any scene test: the profiler names scenes by the event stack. */
++void GXMGpuProfNoteEventPushed(const TCHAR* Name);
++void GXMGpuProfNoteEventPopped();
++
++/** Immediately after sceGxmBeginScene(), from whichever path opened the scene. */
++void GXMGpuProfNoteSceneOpened(const TCHAR* What, uint32 Width, uint32 Height);
++
++/** Every draw, with the same arguments GXMNoteDrawIssued takes. */
++void GXMGpuProfNoteDraw(uint32 IndexCount, uint32 NumInstances);
++
++/** Immediately before sceGxmEndScene(). */
++void GXMGpuProfNoteSceneEnding();
++
++/** Immediately after sceGxmEndScene() and before GXMAdvanceFrameFence(), with the fence value the scene carries. */
++void GXMGpuProfNoteSceneEnded(uint32 FenceValue);
++
++/** Adds a blocking span to the current frame's line. */
++void GXMGpuProfNoteWait(EGXMGpuProfWait Kind, double Seconds);
++
++/** Once per frame from GXMReportScenesForFrame: writes the frame line, drains completions, polls triggers. */
++void GXMGpuProfEndFrame();
++
++#else
++
++inline void GXMGpuProfStartup() {}
++inline void GXMGpuProfShutdown() {}
++inline void GXMGpuProfNoteEventPushed(const TCHAR* Name) {}
++inline void GXMGpuProfNoteEventPopped() {}
++inline void GXMGpuProfNoteSceneOpened(const TCHAR* What, uint32 Width, uint32 Height) {}
++inline void GXMGpuProfNoteDraw(uint32 IndexCount, uint32 NumInstances) {}
++inline void GXMGpuProfNoteSceneEnding() {}
++inline void GXMGpuProfNoteSceneEnded(uint32 FenceValue) {}
++inline void GXMGpuProfNoteWait(EGXMGpuProfWait Kind, double Seconds) {}
++inline void GXMGpuProfEndFrame() {}
++
++#endif
+diff --git a/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMCommands.cpp b/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMCommands.cpp
+index c7d01e4..84dc8a9 100644
+--- a/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMCommands.cpp
++++ b/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMCommands.cpp
+@@ -1065,26 +1065,31 @@ static uint32	GWindowFrames = 0;
+ void GXMNoteBlockedInFlip(double Seconds)
+ {
+ 	GWindowFlipSeconds += Seconds;
++	GXMGpuProfNoteWait(EGXMGpuProfWait::Flip, Seconds);
+ }
+ 
+ void GXMNoteBlockedInThrottle(double Seconds)
+ {
+ 	GWindowThrottleSeconds += Seconds;
++	GXMGpuProfNoteWait(EGXMGpuProfWait::Throttle, Seconds);
+ }
+ 
+ void GXMNoteTimeInPresent(double Seconds)
+ {
+ 	GWindowPresentSeconds += Seconds;
++	GXMGpuProfNoteWait(EGXMGpuProfWait::Present, Seconds);
+ }
+ 
+ void GXMNoteTimeInEndScene(double Seconds)
+ {
+ 	GWindowEndSceneSeconds += Seconds;
++	GXMGpuProfNoteWait(EGXMGpuProfWait::EndScene, Seconds);
+ }
+ 
+ void GXMNoteTimeInBeginScene(double Seconds)
+ {
+ 	GWindowBeginSceneSeconds += Seconds;
++	GXMGpuProfNoteWait(EGXMGpuProfWait::BeginScene, Seconds);
+ }
+ 
+ /*
+@@ -1103,6 +1108,7 @@ void GXMNoteDrawIssued(uint32 IndexCount, uint32 NumInstances)
+ {
+ 	++GWindowDraws;
+ 	GWindowIndices += (uint64)IndexCount * (uint64)FMath::Max(NumInstances, 1u);
++	GXMGpuProfNoteDraw(IndexCount, NumInstances);
+ }
+ 
+ /*
+@@ -1125,11 +1131,13 @@ void GXMNoteGpuFrameLatency(double Seconds)
+ void GXMNoteRenderThreadStall(double Seconds)
+ {
+ 	GWindowRenderStallSeconds += Seconds;
++	GXMGpuProfNoteWait(EGXMGpuProfWait::RenderStall, Seconds);
+ }
+ 
+ void GXMNoteEngineSleep(double Seconds)
+ {
+ 	GWindowEngineSleepSeconds += Seconds;
++	GXMGpuProfNoteWait(EGXMGpuProfWait::EngineSleep, Seconds);
+ }
+ 
+ /**
+@@ -1396,6 +1404,7 @@ uint32 GXMGetViewportSceneFlags()
+ void GXMNoteSceneOpened(const TCHAR* What, uint32 Width, uint32 Height)
+ {
+ 	++GScenesThisFrame;
++	GXMGpuProfNoteSceneOpened(What, Width, Height);
+ 
+ 	if (GXMShouldTrace())
+ 	{
+@@ -1410,6 +1419,8 @@ void GXMNoteFlipQueued()
+ 
+ void GXMReportScenesForFrame()
+ {
++	GXMGpuProfEndFrame();
++
+ 	if (GScenesThisFrame > GPeakScenesPerFrame)
+ 	{
+ 		GPeakScenesPerFrame = GScenesThisFrame;
+@@ -1651,11 +1662,13 @@ void GXMEndSceneIfOpen(FGXMDynamicRHI& RHI)
+ 	}
+ 
+ 	{
++		GXMGpuProfNoteSceneEnding();
+ 		const double EndSceneStartedAt = FPlatformTime::Seconds();
+ 		GXM_VERIFY(sceGxmEndScene(RHI.Context, nullptr, FrameFence));
+ 		GXMNoteTimeInEndScene(FPlatformTime::Seconds() - EndSceneStartedAt);
+ 	}
+ 
++	GXMGpuProfNoteSceneEnded((FrameFence != nullptr) ? FrameFence->value : 0u);
+ 	GXMAdvanceFrameFence(RHI);
+ 
+ 	// PrimaryViewport, because a back buffer scene can now be opened before RHIBeginDrawingViewport has set
+@@ -5230,6 +5243,11 @@ void FGXMDynamicRHI::RHIPushEvent(const TCHAR* Name, FColor Color)
+ 	// resource creation, the render target setup that happens before the first draw. Marking those would fail,
+ 	// and failing a marker is not worth a Fatal, so they are skipped. The nesting stays balanced because
+ 	// RHIPopEvent applies exactly the same test.
++	//
++	// The GPU profiler sees every event, inside a scene or not: it names a scene by the events open when the
++	// scene began, and the render target path opens scenes lazily at the first draw, inside those events.
++	GXMGpuProfNoteEventPushed(Name);
++
+ 	if (Name == nullptr || !bInsideGxmScene)
+ 	{
+ 		return;
+@@ -5244,6 +5262,8 @@ void FGXMDynamicRHI::RHIPopEvent()
+ 	// Only pops markers that were actually pushed; see RHIPushEvent for why some are not. Popping one that was
+ 	// never pushed unbalances libgxm's own marker stack, which shows up in a capture as every subsequent event
+ 	// nested one level too shallow.
++	GXMGpuProfNoteEventPopped();
++
+ 	if (!bInsideGxmScene || GUserMarkerDepth == 0)
+ 	{
+ 		return;
+diff --git a/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMViewport.cpp b/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMViewport.cpp
+index be639ef..e778af8 100644
+--- a/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMViewport.cpp
++++ b/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMViewport.cpp
+@@ -751,11 +751,13 @@ void FGXMViewport::EndDrawing(bool bPresent, bool bLockToVsync)
+ 	}
+ 
+ 	{
++		GXMGpuProfNoteSceneEnding();
+ 		const double EndSceneStartedAt = FPlatformTime::Seconds();
+ 		GXM_VERIFY(sceGxmEndScene(GGXMRHI->Context, nullptr, FrameFence));
+ 		GXMNoteTimeInEndScene(FPlatformTime::Seconds() - EndSceneStartedAt);
+ 	}
+ 
++	GXMGpuProfNoteSceneEnded((FrameFence != nullptr) ? FrameFence->value : 0u);
+ 	GXMAdvanceFrameFence(*GGXMRHI);
+ 	bInsideScene = false;
+ 
+diff --git a/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMRHI.cpp b/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMRHI.cpp
+index 586b8b5..2eb1c20 100644
+--- a/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMRHI.cpp
++++ b/Engine/Source/Runtime/PSP2/GXMRHI/Private/GXMRHI.cpp
+@@ -736,6 +736,9 @@ void FGXMDynamicRHI::Init()
+ 
+ 	GIsRHIInitialized = true;
+ 
++	// Development builds only; see GXMGpuProfiler.cpp. After libgxm is up because its watcher reads the frame fence.
++	GXMGpuProfStartup();
++
+ 	UE_LOG(LogGXM, Log, TEXT("libgxm RHI initialised."));
+ }
+ 
+@@ -756,6 +759,9 @@ void FGXMDynamicRHI::Shutdown()
+ 
+ 	GIsRHIInitialized = false;
+ 
++	// Before the device goes: a recording in progress still has scenes to drain and a file to close.
++	GXMGpuProfShutdown();
++
+ 	check(!GIsCriticalError);
+ 
+ 	// Release in the reverse of the order Init() created them.
